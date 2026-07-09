@@ -1,0 +1,7 @@
+# Milestone 0: no dependencies. worker.py uses only the Python standard
+# library (json, sys) to prove the stdio protocol works before we add any
+# ML weight.
+#
+# Milestone 1 will add here:
+#   sentence-transformers
+#   chromadb

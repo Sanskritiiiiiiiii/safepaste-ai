@@ -1,0 +1,39 @@
+{
+  "name": "safepaste-ai",
+  "displayName": "SafePaste AI",
+  "description": "A safety layer between copying AI-generated code and pasting it into your codebase.",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "main": "./out/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      {
+        "command": "safepaste.ping",
+        "title": "SafePaste: Ping Python Worker"
+      }
+    ],
+    "configuration": {
+      "title": "SafePaste AI",
+      "properties": {
+        "safepaste.pythonPath": {
+          "type": "string",
+          "default": "python3",
+          "description": "Path to the Python executable used to run the SafePaste worker process."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
+  }
+}
