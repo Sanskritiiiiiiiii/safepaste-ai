@@ -14,6 +14,10 @@
       {
         "command": "safepaste.ping",
         "title": "SafePaste: Ping Python Worker"
+      },
+      {
+        "command": "safepaste.chunkRepo",
+        "title": "SafePaste: Chunk Repository (Debug)"
       }
     ],
     "configuration": {
@@ -31,9 +35,11 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./"
   },
+  "dependencies": {
+    "typescript": "^5.4.0"
+  },
   "devDependencies": {
     "@types/vscode": "^1.85.0",
-    "@types/node": "^20.0.0",
-    "typescript": "^5.4.0"
+    "@types/node": "^20.0.0"
   }
 }
