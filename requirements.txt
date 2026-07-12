@@ -1,7 +1,12 @@
-# Milestone 0: no dependencies. worker.py uses only the Python standard
-# library (json, sys) to prove the stdio protocol works before we add any
-# ML weight.
+# Milestone 2: semantic duplicate detection.
 #
-# Milestone 1 will add here:
-#   sentence-transformers
-#   chromadb
+# sentence-transformers — turns code text into embedding vectors.
+# chromadb — stores those vectors locally (embedded mode, no server) and
+#            does nearest-neighbor search. See ARCHITECTURE.md for why we
+#            chose embedded mode over running it as a service.
+#
+# Both are imported lazily in embedder.py / store.py, so the worker
+# process starts fine even before these are installed — only "index" and
+# "check_duplicates" requests need them.
+sentence-transformers>=2.6.0
+chromadb>=0.4.24
