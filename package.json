@@ -4,7 +4,7 @@
   "description": "A safety layer between copying AI-generated code and pasting it into your codebase.",
   "version": "0.0.1",
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.90.0"
   },
   "categories": ["Other"],
   "main": "./out/extension.js",
@@ -47,7 +47,7 @@
     "typescript": "^5.4.0"
   },
   "devDependencies": {
-    "@types/vscode": "^1.85.0",
+    "@types/vscode": "^1.90.0",
     "@types/node": "^20.0.0"
   }
 }
