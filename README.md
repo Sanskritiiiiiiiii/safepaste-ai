@@ -1,6 +1,6 @@
 # 🛡️ SafePaste AI
 
-> A VS Code extension that acts as a safety layer between AI-generated code and your codebase.
+> A VSCode extension that acts as a safety layer between AI-generated code and your codebase very useful.
 
 As developers increasingly rely on AI assistants like ChatGPT, Claude, and GitHub Copilot, code is often copied directly into projects without fully understanding its implications.
 

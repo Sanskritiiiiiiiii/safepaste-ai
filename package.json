@@ -18,6 +18,14 @@
       {
         "command": "safepaste.chunkRepo",
         "title": "SafePaste: Chunk Repository (Debug)"
+      },
+      {
+        "command": "safepaste.indexRepo",
+        "title": "SafePaste: Index Repository"
+      },
+      {
+        "command": "safepaste.checkDuplicates",
+        "title": "SafePaste: Check Selection for Duplicates"
       }
     ],
     "configuration": {
