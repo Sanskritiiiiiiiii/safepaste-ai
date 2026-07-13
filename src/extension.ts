@@ -11,6 +11,7 @@ import {
   CheckDuplicatesResult,
 } from './protocol';
 import { chunkRepository } from './index';
+import { analyzeSafety, SafetyFinding } from './safetyAnalyzer';
 
 let worker: PythonWorker | undefined;
 
@@ -18,22 +19,13 @@ export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel('SafePaste AI');
   context.subscriptions.push(output);
 
-  // const scriptPath = path.join(context.extensionPath, '..', 'python-worker', 'worker.py');
-  output.appendLine(`Extension path = ${context.extensionPath}`);
-
   const scriptPath = path.join(
-      context.extensionPath,
-      "python-worker",
-      "worker.py"
+    context.extensionPath,
+    'python-worker',
+    'worker.py'
   );
-
-  output.appendLine(`Python worker = ${scriptPath}`);
-
-
+  
   // Config value rather than a hardcoded "python3" so this works on
-  // Windows (often "python") without code changes — a one-line setting,
-  // not a feature, so it doesn't fight the "avoid complexity" goal.
-   // Config value rather than a hardcoded "python3" so this works on
   // Windows (often "python") without code changes — a one-line setting,
   // not a feature, so it doesn't fight the "avoid complexity" goal.
   const pythonExecutable = vscode.workspace
@@ -150,7 +142,14 @@ export function activate(context: vscode.ExtensionContext): void {
       // reportErrorsToUser: true — the user explicitly invoked this
       // command, so if something goes wrong (no workspace, worker
       // crashed, etc.) they should see an error message about it.
-      await runDuplicateCheck(selectedText, { reportErrorsToUser: true });
+      // checkDuplicates: true — unconditional, same as before Milestone 4:
+      // a deliberate selection always gets the full check, unlike the
+      // automatic paste path below which gates duplicate-checking on
+      // length.
+      await analyzePastedCode(selectedText, editor!.document.languageId, {
+        reportErrorsToUser: true,
+        checkDuplicates: true,
+      });
     }
   );
 
@@ -176,7 +175,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const pasteProvider = {
     async provideDocumentPasteEdits(
-      _document: vscode.TextDocument,
+      document: vscode.TextDocument,
       _ranges: readonly vscode.Range[],
       dataTransfer: vscode.DataTransfer,
       _context: vscode.DocumentPasteEditContext,
@@ -185,7 +184,7 @@ export function activate(context: vscode.ExtensionContext): void {
       const item = dataTransfer.get('text/plain');
       const pastedText = await item?.asString();
 
-      if (!pastedText || pastedText.trim().length < MIN_PASTE_LENGTH_TO_CHECK) {
+      if (!pastedText) {
         return undefined;
       }
 
@@ -195,7 +194,16 @@ export function activate(context: vscode.ExtensionContext): void {
       // edit, so its normal default paste behavior inserts the text
       // exactly as it always would — this handler never alters what
       // gets pasted, only reacts to it afterward.
-      void runDuplicateCheck(pastedText, { reportErrorsToUser: false });
+      //
+      // checkDuplicates is gated by length, but safety analysis is not:
+      // duplicate detection needs enough text for a meaningful embedding,
+      // but a short snippet can still be dangerous (`eval(x)` is 7
+      // characters), so it would be wrong to skip safety analysis on the
+      // same threshold.
+      void analyzePastedCode(pastedText, document.languageId, {
+        reportErrorsToUser: false,
+        checkDuplicates: pastedText.trim().length >= MIN_PASTE_LENGTH_TO_CHECK,
+      });
 
       return undefined;
     },
@@ -213,32 +221,27 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   /**
-   * Shared core of duplicate checking: sends `code` to the existing
-   * check_duplicates worker command (unchanged from Milestone 2) and
-   * shows the result. Used by both the manual command above and the
-   * automatic paste handler above it.
-   *
-   * `reportErrorsToUser` is the only behavioral difference between the
-   * two callers: the manual command was explicitly invoked, so failures
-   * should be visible; the paste handler runs automatically in the
-   * background on every paste, so failures are logged but not popped up
-   * — a background feature that nags on every failure trains users to
-   * dismiss it rather than trust it.
+   * Fetches duplicate matches from the existing check_duplicates worker
+   * command. Same call, same payload shape, same threshold behavior as
+   * Milestone 2/3 — this is the original runDuplicateCheck() with its
+   * body unchanged, except it now returns the result instead of showing
+   * a notification itself. The caller (analyzePastedCode, below) decides
+   * what to show once it also has the safety-analysis results.
    */
   async function runDuplicateCheck(
     code: string,
-    options: { reportErrorsToUser: boolean }
-  ): Promise<void> {
+    reportErrorsToUser: boolean
+  ): Promise<CheckDuplicatesResult | undefined> {
     let storageDir: string;
     try {
       storageDir = getStorageDir(context);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       output.appendLine(`Duplicate check skipped: ${message}`);
-      if (options.reportErrorsToUser) {
+      if (reportErrorsToUser) {
         vscode.window.showErrorMessage(`SafePaste: ${message}`);
       }
-      return;
+      return undefined;
     }
 
     output.appendLine('Checking for duplicates...');
@@ -252,26 +255,75 @@ export function activate(context: vscode.ExtensionContext): void {
 
       if (result.matches.length === 0) {
         output.appendLine('No significant duplicates found.');
-        return;
+      } else {
+        output.appendLine(`Found ${result.matches.length} possible duplicate(s):\n`);
+        for (const match of result.matches) {
+          output.appendLine(
+            `— ${match.name}  (${match.filePath}:${match.startLine}-${match.endLine})  similarity=${match.similarity}`
+          );
+        }
       }
-
-      const top = result.matches[0];
-      output.appendLine(`Found ${result.matches.length} possible duplicate(s):\n`);
-      for (const match of result.matches) {
-        output.appendLine(
-          `— ${match.name}  (${match.filePath}:${match.startLine}-${match.endLine})  similarity=${match.similarity}`
-        );
-      }
-      vscode.window.showWarningMessage(
-        `⚠ Similar code already exists: ${top.name} (${top.filePath}:${top.startLine}-${top.endLine}). See output panel.`
-      );
+      return result;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       output.appendLine(`Duplicate check failed: ${message}`);
-      if (options.reportErrorsToUser) {
+      if (reportErrorsToUser) {
         vscode.window.showErrorMessage(`SafePaste duplicate check error: ${message}`);
       }
+      return undefined;
     }
+  }
+
+  /**
+   * Milestone 4 entry point, used by both the manual command and the
+   * automatic paste handler. Runs safety analysis (local, synchronous,
+   * instant — no worker involved) and, if requested, duplicate detection
+   * (async, via the unchanged existing worker flow), then shows exactly
+   * one combined notification — or none at all if both are clean,
+   * extending Milestone 3's silence rule to safety findings too.
+   */
+  async function analyzePastedCode(
+    code: string,
+    languageId: string,
+    options: { reportErrorsToUser: boolean; checkDuplicates: boolean }
+  ): Promise<void> {
+    const safetyFindings = analyzeSafety(code, languageId);
+
+    const duplicateResult = options.checkDuplicates
+      ? await runDuplicateCheck(code, options.reportErrorsToUser)
+      : undefined;
+
+    showCombinedNotification(safetyFindings, duplicateResult);
+  }
+
+  function showCombinedNotification(
+    safetyFindings: SafetyFinding[],
+    duplicateResult: CheckDuplicatesResult | undefined
+  ): void {
+    const hasSafetyIssues = safetyFindings.length > 0;
+    const hasDuplicates = !!duplicateResult && duplicateResult.matches.length > 0;
+
+    if (!hasSafetyIssues && !hasDuplicates) {
+      return; // silence — nothing to report
+    }
+
+    const parts: string[] = [];
+
+    if (hasSafetyIssues) {
+      output.appendLine(`Found ${safetyFindings.length} safety issue(s):\n`);
+      for (const finding of safetyFindings) {
+        output.appendLine(`— [${finding.ruleId}] line ${finding.line}: ${finding.message}`);
+      }
+      const ruleIds = Array.from(new Set(safetyFindings.map((f) => f.ruleId))).join(', ');
+      parts.push(`${safetyFindings.length} safety issue(s) (${ruleIds})`);
+    }
+
+    if (hasDuplicates) {
+      const top = duplicateResult!.matches[0];
+      parts.push(`similar code already exists (${top.name}, ${top.filePath}:${top.startLine})`);
+    }
+
+    vscode.window.showWarningMessage(`⚠ ${parts.join(' — ')}. See output panel.`);
   }
 }
 
