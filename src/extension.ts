@@ -12,6 +12,7 @@ import {
 } from './protocol';
 import { chunkRepository } from './index';
 import { analyzeSafety, SafetyFinding } from './safetyAnalyzer';
+import { analyzeArchitecture, ArchitectureFinding } from './architectureAnalyzer';
 
 let worker: PythonWorker | undefined;
 
@@ -19,12 +20,8 @@ export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel('SafePaste AI');
   context.subscriptions.push(output);
 
-  const scriptPath = path.join(
-    context.extensionPath,
-    'python-worker',
-    'worker.py'
-  );
-  
+  const scriptPath = path.join(context.extensionPath, 'python-worker', 'worker.py');
+
   // Config value rather than a hardcoded "python3" so this works on
   // Windows (often "python") without code changes — a one-line setting,
   // not a feature, so it doesn't fight the "avoid complexity" goal.
@@ -139,17 +136,23 @@ export function activate(context: vscode.ExtensionContext): void {
 
       output.show(true);
 
+      const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
       // reportErrorsToUser: true — the user explicitly invoked this
       // command, so if something goes wrong (no workspace, worker
-      // crashed, etc.) they should see an error message about it.
+      // crashed, malformed safepaste.config.json, etc.) they should see
+      // an error message about it.
       // checkDuplicates: true — unconditional, same as before Milestone 4:
       // a deliberate selection always gets the full check, unlike the
       // automatic paste path below which gates duplicate-checking on
       // length.
-      await analyzePastedCode(selectedText, editor!.document.languageId, {
-        reportErrorsToUser: true,
-        checkDuplicates: true,
-      });
+      await analyzePastedCode(
+        selectedText,
+        editor!.document.languageId,
+        editor!.document.uri.fsPath,
+        workspaceRoot,
+        { reportErrorsToUser: true, checkDuplicates: true }
+      );
     }
   );
 
@@ -195,15 +198,23 @@ export function activate(context: vscode.ExtensionContext): void {
       // exactly as it always would — this handler never alters what
       // gets pasted, only reacts to it afterward.
       //
-      // checkDuplicates is gated by length, but safety analysis is not:
-      // duplicate detection needs enough text for a meaningful embedding,
-      // but a short snippet can still be dangerous (`eval(x)` is 7
-      // characters), so it would be wrong to skip safety analysis on the
-      // same threshold.
-      void analyzePastedCode(pastedText, document.languageId, {
-        reportErrorsToUser: false,
-        checkDuplicates: pastedText.trim().length >= MIN_PASTE_LENGTH_TO_CHECK,
-      });
+      // checkDuplicates is gated by length, but safety analysis and the
+      // architecture check are not: duplicate detection needs enough
+      // text for a meaningful embedding, but a short snippet can still
+      // be dangerous (`eval(x)` is 7 characters) or layer-violating, so
+      // it would be wrong to skip those on the same threshold.
+      const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+      void analyzePastedCode(
+        pastedText,
+        document.languageId,
+        document.uri.fsPath,
+        workspaceRoot,
+        {
+          reportErrorsToUser: false,
+          checkDuplicates: pastedText.trim().length >= MIN_PASTE_LENGTH_TO_CHECK,
+        }
+      );
 
       return undefined;
     },
@@ -275,35 +286,64 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   /**
-   * Milestone 4 entry point, used by both the manual command and the
-   * automatic paste handler. Runs safety analysis (local, synchronous,
+   * Milestone 5 entry point (was Milestone 4's), used by both the manual
+   * command and the automatic paste handler. Runs safety analysis and
+   * architecture-compatibility analysis (both local, synchronous,
    * instant — no worker involved) and, if requested, duplicate detection
    * (async, via the unchanged existing worker flow), then shows exactly
-   * one combined notification — or none at all if both are clean,
-   * extending Milestone 3's silence rule to safety findings too.
+   * one combined notification — or none at all if all three are clean,
+   * extending Milestone 3's silence rule to safety and architecture
+   * findings too.
    */
   async function analyzePastedCode(
     code: string,
     languageId: string,
+    targetFilePath: string,
+    workspaceRoot: string | undefined,
     options: { reportErrorsToUser: boolean; checkDuplicates: boolean }
   ): Promise<void> {
     const safetyFindings = analyzeSafety(code, languageId);
+
+    // No workspace open -> no repo to have declared a
+    // safepaste.config.json against, so there's nothing to check. Same
+    // "silent when not applicable" precedent as everything else here —
+    // this is not an error state.
+    let architectureFindings: ArchitectureFinding[] = [];
+    if (workspaceRoot) {
+      try {
+        architectureFindings = analyzeArchitecture(code, languageId, targetFilePath, workspaceRoot);
+      } catch (err) {
+        // analyzeArchitecture only throws for a malformed
+        // safepaste.config.json (missing config is a silent no-op, not
+        // a throw — see architectureConfig.ts) — that's a real user
+        // mistake worth logging, same treatment as any other failure
+        // here: logged always, popped up only if the user explicitly
+        // asked for this check.
+        const message = err instanceof Error ? err.message : String(err);
+        output.appendLine(`Architecture check skipped: ${message}`);
+        if (options.reportErrorsToUser) {
+          vscode.window.showErrorMessage(`SafePaste: ${message}`);
+        }
+      }
+    }
 
     const duplicateResult = options.checkDuplicates
       ? await runDuplicateCheck(code, options.reportErrorsToUser)
       : undefined;
 
-    showCombinedNotification(safetyFindings, duplicateResult);
+    showCombinedNotification(safetyFindings, architectureFindings, duplicateResult);
   }
 
   function showCombinedNotification(
     safetyFindings: SafetyFinding[],
+    architectureFindings: ArchitectureFinding[],
     duplicateResult: CheckDuplicatesResult | undefined
   ): void {
     const hasSafetyIssues = safetyFindings.length > 0;
+    const hasArchitectureIssues = architectureFindings.length > 0;
     const hasDuplicates = !!duplicateResult && duplicateResult.matches.length > 0;
 
-    if (!hasSafetyIssues && !hasDuplicates) {
+    if (!hasSafetyIssues && !hasArchitectureIssues && !hasDuplicates) {
       return; // silence — nothing to report
     }
 
@@ -316,6 +356,14 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       const ruleIds = Array.from(new Set(safetyFindings.map((f) => f.ruleId))).join(', ');
       parts.push(`${safetyFindings.length} safety issue(s) (${ruleIds})`);
+    }
+
+    if (hasArchitectureIssues) {
+      output.appendLine(`Found ${architectureFindings.length} architecture issue(s):\n`);
+      for (const finding of architectureFindings) {
+        output.appendLine(`— [${finding.ruleId}] line ${finding.line}: ${finding.message}`);
+      }
+      parts.push(`${architectureFindings.length} architecture issue(s)`);
     }
 
     if (hasDuplicates) {
