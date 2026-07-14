@@ -9,10 +9,12 @@ import {
   IndexResult,
   CheckDuplicatesPayload,
   CheckDuplicatesResult,
+  DuplicateMatch,
 } from './protocol';
 import { chunkRepository } from './index';
 import { analyzeSafety, SafetyFinding } from './safetyAnalyzer';
 import { analyzeArchitecture, ArchitectureFinding } from './architectureAnalyzer';
+import { formatSummaryMessage, formatOutputSections, Finding } from './resultsFormatter';
 
 let worker: PythonWorker | undefined;
 
@@ -30,6 +32,45 @@ export function activate(context: vscode.ExtensionContext): void {
     .get<string>('pythonPath', 'python3');
 
   worker = new PythonWorker(scriptPath, pythonExecutable, output);
+
+  // ---------------------------------------------------------------------
+  // Milestone 6: status bar. One item for the extension's lifetime,
+  // disposed via context.subscriptions like everything else here. All
+  // text changes go through setStatus/setStatusTemporary below — no
+  // other code in this file ever touches statusBarItem.text directly,
+  // which is what "centralized" means in practice: one place to look to
+  // see every possible status transition.
+  // ---------------------------------------------------------------------
+
+  const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+  context.subscriptions.push(statusBarItem);
+  statusBarItem.show();
+
+  const READY_TEXT = '$(check) SafePaste Ready';
+  const STATUS_RESET_DELAY_MS = 3000;
+
+  // Incremented on every status change. A delayed reset-to-Ready only
+  // applies if no newer status change has happened since it was
+  // scheduled — otherwise a stale timer from an old operation could
+  // clobber a newer operation's still-in-progress status.
+  let statusGeneration = 0;
+
+  function setStatus(text: string): void {
+    statusGeneration++;
+    statusBarItem.text = text;
+  }
+
+  function setStatusTemporary(text: string, resetDelayMs: number = STATUS_RESET_DELAY_MS): void {
+    setStatus(text);
+    const thisGeneration = statusGeneration;
+    setTimeout(() => {
+      if (statusGeneration === thisGeneration) {
+        setStatus(READY_TEXT);
+      }
+    }, resetDelayMs);
+  }
+
+  setStatus(READY_TEXT); // initial state on activation
 
   const pingCommand = vscode.commands.registerCommand('safepaste.ping', async () => {
     output.show(true);
@@ -91,34 +132,60 @@ export function activate(context: vscode.ExtensionContext): void {
     const storageDir = getStorageDir(context);
     output.show(true);
     output.appendLine(`Chunking and indexing ${folder.uri.fsPath} ...`);
+    setStatus('$(sync~spin) Indexing Repository...');
 
-    const chunks = chunkRepository(folder.uri.fsPath);
-    output.appendLine(`Chunked ${chunks.length} function(s). Sending to Python worker for embedding...`);
+    // Milestone 6 Step 4: wraps the existing logic below in a progress
+    // notification — nothing inside this callback is new except the
+    // progress.report() calls themselves. cancellable: false is
+    // deliberate: the Python worker call inside is a single awaited
+    // request/response with no mid-flight abort in the protocol, so a
+    // Cancel button here couldn't actually stop anything — offering one
+    // anyway would be misleading. The status bar (set immediately above,
+    // unchanged from Step 3) continues to reflect the same high-level
+    // phase for as long as this notification is open, and keeps showing
+    // afterward once the notification auto-dismisses.
+    await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: 'SafePaste: Indexing Repository',
+        cancellable: false,
+      },
+      async (progress) => {
+        progress.report({ message: 'Chunking repository...' });
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        const chunks = chunkRepository(folder.uri.fsPath);
+        output.appendLine(`Chunked ${chunks.length} function(s). Sending to Python worker for embedding...`);
 
-    try {
-      const result = await worker!.send<IndexResult>('index', {
-        storageDir,
-        chunks,
-      } satisfies IndexPayload);
-      output.appendLine(`Indexed ${result.chunksIndexed} chunk(s) into ${storageDir}`);
-      if (result.failedChunks.length > 0) {
-        output.appendLine(
-          `Warning: ${result.failedChunks.length} chunk(s) could not be embedded (likely unusual characters in the source) and were skipped from duplicate matching:`
-        );
-        for (const id of result.failedChunks) {
-          output.appendLine(`  - ${id}`);
+        progress.report({ message: `Embedding ${chunks.length} chunk(s)...` });
+
+        try {
+          const result = await worker!.send<IndexResult>('index', {
+            storageDir,
+            chunks,
+          } satisfies IndexPayload);
+          output.appendLine(`Indexed ${result.chunksIndexed} chunk(s) into ${storageDir}`);
+          if (result.failedChunks.length > 0) {
+            output.appendLine(
+              `Warning: ${result.failedChunks.length} chunk(s) could not be embedded (likely unusual characters in the source) and were skipped from duplicate matching:`
+            );
+            for (const id of result.failedChunks) {
+              output.appendLine(`  - ${id}`);
+            }
+          }
+          setStatusTemporary(`$(check) Indexed ${result.chunksIndexed} chunks`);
+          vscode.window.showInformationMessage(
+            result.failedChunks.length > 0
+              ? `SafePaste: indexed ${result.chunksIndexed} chunk(s), ${result.failedChunks.length} skipped. See output panel.`
+              : `SafePaste: indexed ${result.chunksIndexed} chunk(s).`
+          );
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          output.appendLine(`Indexing failed: ${message}`);
+          setStatus(READY_TEXT);
+          vscode.window.showErrorMessage(`SafePaste indexing error: ${message}`);
         }
       }
-      vscode.window.showInformationMessage(
-        result.failedChunks.length > 0
-          ? `SafePaste: indexed ${result.chunksIndexed} chunk(s), ${result.failedChunks.length} skipped. See output panel.`
-          : `SafePaste: indexed ${result.chunksIndexed} chunk(s).`
-      );
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      output.appendLine(`Indexing failed: ${message}`);
-      vscode.window.showErrorMessage(`SafePaste indexing error: ${message}`);
-    }
+    );
   });
 
   context.subscriptions.push(indexCommand);
@@ -135,6 +202,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
 
       output.show(true);
+      setStatus('$(sync~spin) Analyzing...');
 
       const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
@@ -146,13 +214,23 @@ export function activate(context: vscode.ExtensionContext): void {
       // a deliberate selection always gets the full check, unlike the
       // automatic paste path below which gates duplicate-checking on
       // length.
-      await analyzePastedCode(
-        selectedText,
-        editor!.document.languageId,
-        editor!.document.uri.fsPath,
-        workspaceRoot,
-        { reportErrorsToUser: true, checkDuplicates: true }
-      );
+      try {
+        await analyzePastedCode(
+          selectedText,
+          editor!.document.languageId,
+          editor!.document.uri.fsPath,
+          workspaceRoot,
+          { reportErrorsToUser: true, checkDuplicates: true }
+        );
+        setStatusTemporary('$(check) Analysis Complete');
+      } catch {
+        // analyzePastedCode's own sub-checks each have internal
+        // try/catch and don't rethrow, so this shouldn't trigger in
+        // practice — kept as a guarantee that the status bar always
+        // returns to Ready rather than getting stuck on "Analyzing..."
+        // if that assumption is ever wrong.
+        setStatus(READY_TEXT);
+      }
     }
   );
 
@@ -264,16 +342,6 @@ export function activate(context: vscode.ExtensionContext): void {
         topK: 5,
       } satisfies CheckDuplicatesPayload);
 
-      if (result.matches.length === 0) {
-        output.appendLine('No significant duplicates found.');
-      } else {
-        output.appendLine(`Found ${result.matches.length} possible duplicate(s):\n`);
-        for (const match of result.matches) {
-          output.appendLine(
-            `— ${match.name}  (${match.filePath}:${match.startLine}-${match.endLine})  similarity=${match.similarity}`
-          );
-        }
-      }
       return result;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -309,9 +377,11 @@ export function activate(context: vscode.ExtensionContext): void {
     // "silent when not applicable" precedent as everything else here —
     // this is not an error state.
     let architectureFindings: ArchitectureFinding[] = [];
+    let architectureChecked = false;
     if (workspaceRoot) {
       try {
         architectureFindings = analyzeArchitecture(code, languageId, targetFilePath, workspaceRoot);
+        architectureChecked = true;
       } catch (err) {
         // analyzeArchitecture only throws for a malformed
         // safepaste.config.json (missing config is a silent no-op, not
@@ -331,47 +401,80 @@ export function activate(context: vscode.ExtensionContext): void {
       ? await runDuplicateCheck(code, options.reportErrorsToUser)
       : undefined;
 
-    showCombinedNotification(safetyFindings, architectureFindings, duplicateResult);
+    showCombinedNotification(
+      safetyFindings,
+      architectureFindings,
+      architectureChecked,
+      duplicateResult,
+      options.checkDuplicates
+    );
   }
 
+  // ---------------------------------------------------------------------
+  // Milestone 6: adapters converting each analyzer's own finding type
+  // into resultsFormatter's generic Finding shape. This conversion is
+  // deliberately kept here, not in resultsFormatter.ts — that module must
+  // never know these analyzer-specific types exist.
+  // ---------------------------------------------------------------------
+
+  function toSafetyFindings(findings: SafetyFinding[]): Finding[] {
+    return findings.map((f) => ({ category: 'Safety Analysis', message: f.message, line: f.line }));
+  }
+
+  function toArchitectureFindings(findings: ArchitectureFinding[]): Finding[] {
+    return findings.map((f) => ({ category: 'Architecture Compatibility', message: f.message, line: f.line }));
+  }
+
+  function toDuplicateFindings(matches: DuplicateMatch[]): Finding[] {
+    return matches.map((m) => ({
+      category: 'Duplicate Detection',
+      message: `Similar function already exists: ${m.name} (${m.filePath}:${m.startLine}-${m.endLine}, similarity ${m.similarity})`,
+    }));
+  }
+
+  /**
+   * Builds the combined Finding[] and category list, then delegates all
+   * actual text formatting to resultsFormatter.ts. `architectureChecked`
+   * and `duplicatesChecked` matter because an empty findings array can
+   * mean either "checked, found nothing" or "never checked" — those are
+   * different facts, and only the first should be reported as
+   * "No issues found." A skipped check's category is simply omitted from
+   * the report for that call, rather than falsely claiming it was clean.
+   */
   function showCombinedNotification(
     safetyFindings: SafetyFinding[],
     architectureFindings: ArchitectureFinding[],
-    duplicateResult: CheckDuplicatesResult | undefined
+    architectureChecked: boolean,
+    duplicateResult: CheckDuplicatesResult | undefined,
+    duplicatesChecked: boolean
   ): void {
-    const hasSafetyIssues = safetyFindings.length > 0;
-    const hasArchitectureIssues = architectureFindings.length > 0;
-    const hasDuplicates = !!duplicateResult && duplicateResult.matches.length > 0;
+    const categories: string[] = [];
+    if (duplicatesChecked) categories.push('Duplicate Detection');
+    categories.push('Safety Analysis'); // always runs, unconditionally
+    if (architectureChecked) categories.push('Architecture Compatibility');
 
-    if (!hasSafetyIssues && !hasArchitectureIssues && !hasDuplicates) {
-      return; // silence — nothing to report
+    const allFindings: Finding[] = [
+      ...(duplicatesChecked ? toDuplicateFindings(duplicateResult?.matches ?? []) : []),
+      ...toSafetyFindings(safetyFindings),
+      ...(architectureChecked ? toArchitectureFindings(architectureFindings) : []),
+    ];
+
+    // Output panel is pull-based (only visible if the user opens it), so
+    // always logging the full report there — including "no issues
+    // found" — is fine; it confirms the tool ran rather than looking
+    // silent. This is more verbose than Milestone 5's output logging,
+    // which only printed a category's lines when it had findings — a
+    // deliberate, disclosed change per the Milestone 6 design.
+    output.appendLine(formatOutputSections(categories, allFindings));
+
+    // The notification popup keeps the exact same trigger condition as
+    // Milestone 3 onward: silent unless allFindings is non-empty. Only
+    // the wording changed (generic, via resultsFormatter), not when it
+    // fires.
+    const summary = formatSummaryMessage(allFindings);
+    if (summary) {
+      vscode.window.showWarningMessage(`⚠ ${summary}. See output panel for details.`);
     }
-
-    const parts: string[] = [];
-
-    if (hasSafetyIssues) {
-      output.appendLine(`Found ${safetyFindings.length} safety issue(s):\n`);
-      for (const finding of safetyFindings) {
-        output.appendLine(`— [${finding.ruleId}] line ${finding.line}: ${finding.message}`);
-      }
-      const ruleIds = Array.from(new Set(safetyFindings.map((f) => f.ruleId))).join(', ');
-      parts.push(`${safetyFindings.length} safety issue(s) (${ruleIds})`);
-    }
-
-    if (hasArchitectureIssues) {
-      output.appendLine(`Found ${architectureFindings.length} architecture issue(s):\n`);
-      for (const finding of architectureFindings) {
-        output.appendLine(`— [${finding.ruleId}] line ${finding.line}: ${finding.message}`);
-      }
-      parts.push(`${architectureFindings.length} architecture issue(s)`);
-    }
-
-    if (hasDuplicates) {
-      const top = duplicateResult!.matches[0];
-      parts.push(`similar code already exists (${top.name}, ${top.filePath}:${top.startLine})`);
-    }
-
-    vscode.window.showWarningMessage(`⚠ ${parts.join(' — ')}. See output panel.`);
   }
 }
 
