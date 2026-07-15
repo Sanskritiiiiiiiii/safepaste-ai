@@ -8,6 +8,24 @@
 **SafePaste AI** is a VS Code extension that acts as a safety layer for AI-generated code. It sits between *copy* and *paste* — automatically checking pasted code for duplicate logic, security risks, and architecture violations before you commit to it, without ever modifying your code or getting in your way.
 
 ---
+# 📸 SafePaste AI in Action
+
+<p align="center">
+  <img src="images/hero-demo.png" alt="SafePaste AI Demo" width="100%">
+</p>
+
+SafePaste AI analyzes AI-generated code **before it reaches your codebase**, helping developers identify common issues without leaving VS Code.
+
+### In this example, SafePaste detects:
+
+- 🔐 **Hardcoded Secret Detection** – Warns about API keys, tokens, and passwords committed directly in source code.
+- 🔄 **Duplicate Function Detection** – Finds implementations that already exist elsewhere in the project.
+- 🏗️ **Architecture Rule Enforcement** – Flags code that violates project layer conventions (such as direct database access from controllers).
+- ⚠️ **Native VS Code Diagnostics** – Displays findings directly in the Problems panel with editor highlights and notifications.
+
+> SafePaste works entirely inside VS Code, allowing developers to catch potential issues before committing AI-generated code.
+
+---
 
 ## 📌 Problem Statement
 
