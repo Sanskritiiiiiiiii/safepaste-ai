@@ -27,6 +27,67 @@ SafePaste AI analyzes **AI-generated code before it reaches your codebase**, hel
 
 ---
 
+# 📸 Screenshots
+
+## 🚀 SafePaste AI in Action
+
+This example demonstrates SafePaste AI analyzing AI-generated code **before it reaches your codebase**. The extension detects security issues, duplicate implementations, and architecture rule violations directly inside VS Code.
+
+![SafePaste AI Demo](images/hero-demo.png)
+
+### ✨ What SafePaste detects
+
+<table>
+<tr>
+<td width="50%">
+
+### 🔐 Hardcoded Secret Detection
+
+Warns when API keys, tokens, or passwords are committed directly into source code.
+
+<img src="images/hardcoded-secret.png" alt="Hardcoded Secret Detection" />
+
+</td>
+
+<td width="50%">
+
+### 🔁 Duplicate Function Detection
+
+Detects implementations that already exist elsewhere in the project using semantic similarity.
+
+<img src="images/duplicate-function.png" alt="Duplicate Function Detection" />
+
+</td>
+</tr>
+
+<tr>
+<td width="50%">
+
+### 🏗️ Architecture Rule Enforcement
+
+Flags code that violates project architecture rules, such as direct database access from controllers.
+
+<img src="images/architecture-rule.png" alt="Architecture Rule Enforcement" />
+
+</td>
+
+<td width="50%">
+
+### ⚠️ Native VS Code Diagnostics
+
+Displays findings directly inside the Problems panel with editor highlights and notifications.
+
+<img src="images/problems-panel.png" alt="VS Code Problems Panel" />
+
+</td>
+</tr>
+</table>
+
+> SafePaste AI works entirely inside VS Code, helping developers identify potential issues before AI-generated code becomes part of the codebase.
+
+---
+---
+
 ## 📌 Problem Statement
 
 Modern development leans heavily on AI code generation — ChatGPT, Copilot, Cursor, Claude — and the workflow has quietly become:
