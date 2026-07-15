@@ -14,7 +14,7 @@
   <img src="images/hero-demo.png" alt="SafePaste AI Demo" width="100%">
 </p>
 
-SafePaste AI analyzes AI-generated code **before it reaches your codebase**, helping developers identify common issues without leaving VS Code.
+SafePaste AI analyzes **AI-generated code before it reaches your codebase**, helping developers identify **security risks**, **duplicate logic**, and **architecture violations** without leaving VS Code.
 
 ### In this example, SafePaste detects:
 
