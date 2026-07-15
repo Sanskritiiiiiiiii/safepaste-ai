@@ -15,6 +15,14 @@ import { chunkRepository } from './index';
 import { analyzeSafety, SafetyFinding } from './safetyAnalyzer';
 import { analyzeArchitecture, ArchitectureFinding } from './architectureAnalyzer';
 import { formatSummaryMessage, formatOutputSections, Finding } from './resultsFormatter';
+import {
+  createDiagnosticCollection,
+  publishDiagnostics,
+  clearDiagnostics,
+  toSafetyDiagnostics,
+  toArchitectureDiagnostics,
+  toDuplicateDiagnostics,
+} from './diagnostics';
 
 let worker: PythonWorker | undefined;
 
@@ -24,6 +32,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const scriptPath = path.join(context.extensionPath, 'python-worker', 'worker.py');
 
+
   // Config value rather than a hardcoded "python3" so this works on
   // Windows (often "python") without code changes — a one-line setting,
   // not a feature, so it doesn't fight the "avoid complexity" goal.
@@ -32,6 +41,13 @@ export function activate(context: vscode.ExtensionContext): void {
     .get<string>('pythonPath', 'python3');
 
   worker = new PythonWorker(scriptPath, pythonExecutable, output);
+
+  // Milestone 7: Problems panel integration. The collection itself and
+  // all adapter/translation logic already live in diagnostics.ts
+  // (built and verified in Step 1) — this is the only line needed to
+  // instantiate it, same lifecycle pattern as the output channel above.
+  const diagnosticCollection = createDiagnosticCollection();
+  context.subscriptions.push(diagnosticCollection);
 
   // ---------------------------------------------------------------------
   // Milestone 6: status bar. One item for the extension's lifetime,
@@ -152,7 +168,6 @@ export function activate(context: vscode.ExtensionContext): void {
       },
       async (progress) => {
         progress.report({ message: 'Chunking repository...' });
-        await new Promise(resolve => setTimeout(resolve, 3000));
         const chunks = chunkRepository(folder.uri.fsPath);
         output.appendLine(`Chunked ${chunks.length} function(s). Sending to Python worker for embedding...`);
 
@@ -220,6 +235,7 @@ export function activate(context: vscode.ExtensionContext): void {
           editor!.document.languageId,
           editor!.document.uri.fsPath,
           workspaceRoot,
+          editor!.selection.start.line,
           { reportErrorsToUser: true, checkDuplicates: true }
         );
         setStatusTemporary('$(check) Analysis Complete');
@@ -257,7 +273,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const pasteProvider = {
     async provideDocumentPasteEdits(
       document: vscode.TextDocument,
-      _ranges: readonly vscode.Range[],
+      ranges: readonly vscode.Range[],
       dataTransfer: vscode.DataTransfer,
       _context: vscode.DocumentPasteEditContext,
       _token: vscode.CancellationToken
@@ -288,6 +304,7 @@ export function activate(context: vscode.ExtensionContext): void {
         document.languageId,
         document.uri.fsPath,
         workspaceRoot,
+        ranges[0]?.start.line ?? 0,
         {
           reportErrorsToUser: false,
           checkDuplicates: pastedText.trim().length >= MIN_PASTE_LENGTH_TO_CHECK,
@@ -368,6 +385,7 @@ export function activate(context: vscode.ExtensionContext): void {
     languageId: string,
     targetFilePath: string,
     workspaceRoot: string | undefined,
+    pasteStartLine: number,
     options: { reportErrorsToUser: boolean; checkDuplicates: boolean }
   ): Promise<void> {
     const safetyFindings = analyzeSafety(code, languageId);
@@ -401,7 +419,24 @@ export function activate(context: vscode.ExtensionContext): void {
       ? await runDuplicateCheck(code, options.reportErrorsToUser)
       : undefined;
 
+    // Analysis is complete at this point — everything below is
+    // presentation only, and each presentation channel is an
+    // independent, parallel step, not nested inside another. Adding the
+    // Problems panel here means adding a sibling call, not touching the
+    // notification/output logic above or within showCombinedNotification.
     showCombinedNotification(
+      safetyFindings,
+      architectureFindings,
+      architectureChecked,
+      duplicateResult,
+      options.checkDuplicates
+    );
+
+    publishDiagnosticsForAnalysis(
+      targetFilePath,
+      pasteStartLine,
+      code.split('\n').length,
+      workspaceRoot,
       safetyFindings,
       architectureFindings,
       architectureChecked,
@@ -474,6 +509,43 @@ export function activate(context: vscode.ExtensionContext): void {
     const summary = formatSummaryMessage(allFindings);
     if (summary) {
       vscode.window.showWarningMessage(`⚠ ${summary}. See output panel for details.`);
+    }
+  }
+
+  /**
+   * Milestone 7: publishes the same already-computed findings to the
+   * Problems panel. A sibling to showCombinedNotification above, not a
+   * step inside it — this function does no analysis of its own, it only
+   * converts data that already exists into vscode.Diagnostic[] via the
+   * adapters already built and verified in diagnostics.ts, then
+   * publishes or clears. Same "checked vs skipped" distinction as the
+   * notification: a category that was never checked is omitted rather
+   * than published as falsely clean.
+   */
+  function publishDiagnosticsForAnalysis(
+    targetFilePath: string,
+    pasteStartLine: number,
+    pasteLineCount: number,
+    workspaceRoot: string | undefined,
+    safetyFindings: SafetyFinding[],
+    architectureFindings: ArchitectureFinding[],
+    architectureChecked: boolean,
+    duplicateResult: CheckDuplicatesResult | undefined,
+    duplicatesChecked: boolean
+  ): void {
+    const diagnostics = [
+      ...toSafetyDiagnostics(safetyFindings, pasteStartLine),
+      ...(architectureChecked ? toArchitectureDiagnostics(architectureFindings, pasteStartLine) : []),
+      ...(duplicatesChecked && workspaceRoot
+        ? toDuplicateDiagnostics(duplicateResult?.matches ?? [], pasteStartLine, pasteLineCount, workspaceRoot)
+        : []),
+    ];
+
+    const uri = vscode.Uri.file(targetFilePath);
+    if (diagnostics.length > 0) {
+      publishDiagnostics(diagnosticCollection, uri, diagnostics);
+    } else {
+      clearDiagnostics(diagnosticCollection, uri);
     }
   }
 }
